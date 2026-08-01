@@ -1,0 +1,29 @@
+services:
+  mobotix-relay:
+    build: .
+    container_name: mobotix-relay
+    restart: unless-stopped
+    ports:
+      - "${RELAY_PORT:-18425}:18425"
+    environment:
+      HA_WEBHOOK_URL: "${HA_WEBHOOK_URL:?Set HA_WEBHOOK_URL in .env}"
+      PUBLIC_BASE_URL: "${PUBLIC_BASE_URL:-}"
+      LOG_LEVEL: "${LOG_LEVEL:-INFO}"
+      REQUEST_TIMEOUT: "${REQUEST_TIMEOUT:-10}"
+      RETRY_COUNT: "${RETRY_COUNT:-3}"
+    volumes:
+      - relay-images:/data/images
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:18425/healthz', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  relay-images:
