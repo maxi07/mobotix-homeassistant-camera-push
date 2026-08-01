@@ -8,8 +8,9 @@ Flow:
 
 ```text
 Mobotix T25 -> Relay:18425 -> Home Assistant webhook -> Phone notification
-                         -> Image at /images/<random-name>.jpg
 ```
+
+![Home Assistant Push Notification](/documentation/home-assistant-screenshot.jpeg)
 
 ## Requirements
 
