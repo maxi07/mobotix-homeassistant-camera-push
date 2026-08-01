@@ -5,6 +5,8 @@ services:
     restart: unless-stopped
     ports:
       - "${RELAY_PORT:-18425}:18425"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
       HA_WEBHOOK_URL: "${HA_WEBHOOK_URL:?Set HA_WEBHOOK_URL in .env}"
       PUBLIC_BASE_URL: "${PUBLIC_BASE_URL:-}"
