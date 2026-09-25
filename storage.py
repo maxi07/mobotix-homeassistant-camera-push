@@ -17,6 +17,10 @@ Two backends are available and selected with ``STORAGE_BACKEND``:
 Both backends expire images. Expiry is best effort for deletion but exact for
 access: once a presigned URL is past its TTL it stops working regardless of
 whether the object still exists.
+
+Note on the rejection of unsigned requests: that happens between the phone and
+R2, not inside this relay. The relay only ever creates the URL. Errors handled
+here are the ones raised by the relay's own calls to R2.
 """
 
 import logging
@@ -30,15 +34,77 @@ SWEEP_MIN_INTERVAL = 30.0
 SWEEP_MAX_INTERVAL = 300.0
 
 
+class StorageError(RuntimeError):
+    """A storage operation was rejected by the backend.
+
+    Carries the HTTP status and the provider error code so callers can log
+    something more useful than a stack trace.
+    """
+
+    def __init__(self, message: str, status=None, code: str = "") -> None:
+        super().__init__(message)
+        self.status = status
+        self.code = code
+
+
+# Cloudflare R2 answers with standard S3 error codes. These are the ones a
+# misconfigured relay actually runs into; the hint names the setting to check.
+ERROR_HINTS = {
+    "InvalidAccessKeyId": (
+        "R2_ACCESS_KEY_ID is unknown - the token may have been revoked"
+    ),
+    "SignatureDoesNotMatch": (
+        "R2_SECRET_ACCESS_KEY does not match R2_ACCESS_KEY_ID"
+    ),
+    "InvalidArgument": (
+        "malformed request - check R2_ENDPOINT_URL, it must not contain the "
+        "bucket name"
+    ),
+    "AccessDenied": (
+        "the API token lacks Object Read & Write permission on this bucket"
+    ),
+    "NoSuchBucket": (
+        "bucket not found - check R2_BUCKET and that the token is scoped to it"
+    ),
+    "PermanentRedirect": (
+        "wrong endpoint for this bucket - an EU bucket needs the .eu. endpoint"
+    ),
+    "EntityTooLarge": "the image exceeds the size R2 accepts for a single PUT",
+}
+
+
+def describe_error(operation: str, error: Exception) -> StorageError:
+    """Turn a botocore exception into a StorageError with a usable message."""
+    response = getattr(error, "response", None)
+    if not isinstance(response, dict):
+        return StorageError(f"{operation} failed: {error}")
+    metadata = response.get("ResponseMetadata") or {}
+    status = metadata.get("HTTPStatusCode")
+    code = (response.get("Error") or {}).get("Code", "")
+    hint = ERROR_HINTS.get(code, "")
+    message = f"{operation} failed with HTTP {status}"
+    if code:
+        message += f" ({code})"
+    if hint:
+        message += f" - {hint}"
+    return StorageError(message, status=status, code=code)
+
+
+def guard(operation: str, call, **kwargs):
+    """Run an S3 call and translate provider failures into StorageError."""
+    try:
+        return call(**kwargs)
+    except StorageError:
+        raise
+    except Exception as error:  # noqa: BLE001 - translated below
+        raise describe_error(operation, error) from error
+
+
 def _sweep_interval(retention_seconds: float) -> float:
     """Sweep often enough to honour the retention window, but not excessively."""
     if retention_seconds <= 0:
         return SWEEP_MAX_INTERVAL
     return max(SWEEP_MIN_INTERVAL, min(SWEEP_MAX_INTERVAL, retention_seconds / 2))
-
-
-def _log_sweep_error(error: Exception) -> None:
-    LOGGER.warning("Expiry sweep failed error=%s", error)
 
 
 class LocalStorage:
@@ -52,7 +118,10 @@ class LocalStorage:
         self.retention_seconds = retention_seconds
 
     def store(self, key: str, data: bytes, content_type: str) -> None:
-        (self.image_dir / key).write_bytes(data)
+        try:
+            (self.image_dir / key).write_bytes(data)
+        except OSError as error:
+            raise StorageError(f"writing {key} failed: {error}") from error
 
     def url_for(self, key: str, base_url: str) -> str:
         return f"{base_url.rstrip('/')}/images/{key}"
@@ -127,7 +196,9 @@ class R2Storage:
         return f"{self.key_prefix}/{key}"
 
     def store(self, key: str, data: bytes, content_type: str) -> None:
-        self.client.put_object(
+        guard(
+            "upload",
+            self.client.put_object,
             Bucket=self.bucket,
             Key=self._full_key(key),
             Body=data,
@@ -135,8 +206,10 @@ class R2Storage:
         )
 
     def url_for(self, key: str, base_url: str) -> str:
-        return self.client.generate_presigned_url(
-            "get_object",
+        return guard(
+            "signing",
+            self.client.generate_presigned_url,
+            ClientMethod="get_object",
             Params={"Bucket": self.bucket, "Key": self._full_key(key)},
             ExpiresIn=self.url_ttl_seconds,
         )
@@ -151,8 +224,11 @@ class R2Storage:
         ]
         if not expired:
             return 0
-        self.client.delete_objects(
-            Bucket=self.bucket, Delete={"Objects": expired}
+        guard(
+            "delete",
+            self.client.delete_objects,
+            Bucket=self.bucket,
+            Delete={"Objects": expired},
         )
         LOGGER.info("Expired R2 objects removed=%s", len(expired))
         return len(expired)
@@ -161,11 +237,15 @@ class R2Storage:
         params = {"Bucket": self.bucket, "MaxKeys": 1000}
         if self.key_prefix:
             params["Prefix"] = f"{self.key_prefix}/"
-        response = self.client.list_objects_v2(**params)
+        response = guard("listing", self.client.list_objects_v2, **params)
         return response.get("Contents", [])
 
+    def check(self) -> None:
+        """Verify credentials and bucket access. Raises StorageError."""
+        self._list_objects()
 
-def start_sweeper(backend, retention_seconds: float) -> threading.Thread | None:
+
+def start_sweeper(backend, retention_seconds: float):
     """Run ``backend.sweep()`` periodically in a daemon thread."""
     if retention_seconds <= 0:
         return None
@@ -190,5 +270,7 @@ def start_sweeper(backend, retention_seconds: float) -> threading.Thread | None:
 def _run_sweep(backend) -> None:
     try:
         backend.sweep()
+    except StorageError as error:
+        LOGGER.warning("Expiry sweep rejected: %s", error)
     except Exception as error:  # noqa: BLE001 - sweeper must never die
-        _log_sweep_error(error)
+        LOGGER.warning("Expiry sweep failed error=%s", error)

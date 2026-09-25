@@ -23,7 +23,7 @@ class FakeR2Client:
         self.put_calls.append((Bucket, Key, ContentType))
         self.objects[Key] = {"body": Body, "modified": time.time()}
 
-    def generate_presigned_url(self, operation, Params, ExpiresIn):
+    def generate_presigned_url(self, ClientMethod, Params, ExpiresIn):
         key = Params["Key"]
         return (
             f"https://account.eu.r2.cloudflarestorage.com/{key}"

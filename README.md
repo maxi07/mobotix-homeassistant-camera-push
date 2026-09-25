@@ -289,9 +289,23 @@ templates:
 - `400 multipart image is required`: No part with an `image/*` Content-Type was
   included and no supported image signature was detected. Check the
   `body_length`, `files`, and `form_fields` values in the preceding log entry.
-- `502 storing the image failed`: The storage backend rejected the upload.
-  With `STORAGE_BACKEND=r2`, check the credentials, bucket name and
-  jurisdiction. The preceding log entry names the underlying error.
+- `502 <operation> failed with HTTP <status> (<Code>)`: The storage backend
+  rejected the call. With `STORAGE_BACKEND=r2` the message names the setting
+  to check:
+
+  | Code | What to fix |
+  | --- | --- |
+  | `InvalidArgument` (400) | `R2_ENDPOINT_URL` — it must not contain the bucket name |
+  | `SignatureDoesNotMatch` (400) | `R2_SECRET_ACCESS_KEY` does not match the key ID |
+  | `InvalidAccessKeyId` (403) | `R2_ACCESS_KEY_ID` unknown, token possibly revoked |
+  | `AccessDenied` (403) | token lacks Object Read & Write on this bucket |
+  | `NoSuchBucket` (404) | `R2_BUCKET` wrong, or token not scoped to it |
+  | `PermanentRedirect` (301) | wrong endpoint — an EU bucket needs the `.eu.` host |
+
+  Home Assistant is not contacted when the image could not be stored, so no
+  notification goes out with a dead URL.
+- `502 storing the image failed`: An unexpected error the backend did not
+  classify. The preceding log entry has the details.
 - `502 Home Assistant delivery failed`: Check the URL, webhook ID, DNS, and
   Home Assistant connectivity.
 - `STORAGE_BACKEND=r2 requires: ...` on startup: one or more R2 settings are

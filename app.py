@@ -11,7 +11,7 @@ import requests
 from flask import Flask, jsonify, request, send_from_directory
 from werkzeug.utils import secure_filename
 
-from storage import LocalStorage, R2Storage, start_sweeper
+from storage import LocalStorage, R2Storage, StorageError, start_sweeper
 
 
 LOGGER = logging.getLogger("mobotix-relay")
@@ -255,8 +255,23 @@ def create_app(config: dict | None = None) -> Flask:
         original_name = f"{Path(original_name).stem}{suffix}"
         stored_name = f"{uuid4().hex}{suffix}"
 
+        source_ip = request.remote_addr or "unknown"
+        if source_ip.startswith("::ffff:"):
+            source_ip = source_ip.removeprefix("::ffff:")
+        public_base_url = app.config["PUBLIC_BASE_URL"] or request.host_url
+
         try:
             storage.store(stored_name, image, image_content_type)
+            image_url = storage.url_for(stored_name, public_base_url)
+        except StorageError as error:
+            LOGGER.error(
+                "Storing image failed backend=%s status=%s code=%s: %s",
+                storage.name,
+                error.status,
+                error.code or "-",
+                error,
+            )
+            return jsonify(error=str(error)), 502
         except Exception as error:  # noqa: BLE001 - surface any backend fault
             LOGGER.error(
                 "Storing image failed backend=%s error=%s",
@@ -265,15 +280,10 @@ def create_app(config: dict | None = None) -> Flask:
             )
             return jsonify(error="storing the image failed"), 502
 
-        source_ip = request.remote_addr or "unknown"
-        if source_ip.startswith("::ffff:"):
-            source_ip = source_ip.removeprefix("::ffff:")
-
         fields.setdefault("message", "Mobotix event")
         fields["source_ip"] = source_ip
         fields["received_at"] = datetime.now(timezone.utc).isoformat()
-        public_base_url = app.config["PUBLIC_BASE_URL"] or request.host_url
-        fields["image_url"] = storage.url_for(stored_name, public_base_url)
+        fields["image_url"] = image_url
         files = {
             field_name: (
                 original_name,
