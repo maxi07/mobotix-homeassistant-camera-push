@@ -1,0 +1,79 @@
+name: Tests
+
+# Run on every pull request, and on pushes to main so a direct commit or a
+# merge that bypassed a PR is still verified.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  # A new push to the same branch cancels the previous run.
+  group: tests-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pytest:
+    name: pytest (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.13 matches the Dockerfile; 3.14 verifies the suite stays
+        # green on the next release.
+        python-version: ["3.13", "3.14"]
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: Run tests
+        run: python -m pytest tests/ -v
+
+  docker:
+    name: docker build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Build image
+        run: docker build -t mobotix-relay:ci .
+
+      - name: Container starts and answers the healthcheck
+        run: |
+          docker run -d --name relay-ci -p 18425:18425 \
+            -e HA_WEBHOOK_URL=http://127.0.0.1:9/api/webhook/ci \
+            -e STORAGE_BACKEND=local \
+            mobotix-relay:ci
+          for attempt in $(seq 1 20); do
+            if curl -fsS --max-time 3 http://localhost:18425/healthz; then
+              echo "healthy after ${attempt} attempt(s)"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "relay did not become healthy"
+          docker logs relay-ci
+          exit 1
+
+      - name: Stop container
+        if: always()
+        run: docker rm -f relay-ci || true

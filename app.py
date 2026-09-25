@@ -11,6 +11,14 @@ import requests
 from flask import Flask, jsonify, request, send_from_directory
 from werkzeug.utils import secure_filename
 
+from storage import (
+    DEFAULT_KEY_PREFIX,
+    LocalStorage,
+    R2Storage,
+    StorageError,
+    start_sweeper,
+)
+
 
 LOGGER = logging.getLogger("mobotix-relay")
 
@@ -65,6 +73,91 @@ def parse_mime_parts(
     return parts
 
 
+def env_flag(name: str, default: str = "true") -> bool:
+    """Read a boolean environment value."""
+    return os.getenv(name, default).strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+        "",
+    )
+
+
+def positive_int(app: Flask, name: str) -> int:
+    """Read a config value that must be a positive integer."""
+    try:
+        value = int(app.config[name])
+    except (TypeError, ValueError):
+        raise RuntimeError(f"{name} must be a whole number") from None
+    if value <= 0:
+        raise RuntimeError(f"{name} must be greater than 0, got {value}")
+    return value
+
+
+def build_storage(app: Flask):
+    """Create the storage backend selected by STORAGE_BACKEND."""
+    backend = (app.config["STORAGE_BACKEND"] or "local").strip().lower()
+    if backend == "local":
+        return LocalStorage(
+            app.config["IMAGE_DIR"],
+            retention_seconds=app.config["IMAGE_RETENTION_MINUTES"] * 60,
+        )
+    if backend == "r2":
+        return build_r2_storage(app)
+    raise RuntimeError(
+        f"STORAGE_BACKEND must be 'local' or 'r2', got {backend!r}"
+    )
+
+
+def build_r2_storage(app: Flask) -> R2Storage:
+    """Create the R2 backend, failing loudly on incomplete configuration."""
+    missing = [
+        name
+        for name in (
+            "R2_BUCKET",
+            "R2_ACCESS_KEY_ID",
+            "R2_SECRET_ACCESS_KEY",
+        )
+        if not app.config.get(name)
+    ]
+    endpoint = app.config["R2_ENDPOINT_URL"] or derive_r2_endpoint(
+        app.config["R2_ACCOUNT_ID"], app.config["R2_JURISDICTION"]
+    )
+    if not endpoint:
+        missing.append("R2_ACCOUNT_ID (or R2_ENDPOINT_URL)")
+    if missing:
+        raise RuntimeError(
+            "STORAGE_BACKEND=r2 requires: " + ", ".join(missing)
+        )
+    storage = R2Storage(
+        bucket=app.config["R2_BUCKET"],
+        endpoint_url=endpoint,
+        access_key_id=app.config["R2_ACCESS_KEY_ID"],
+        access_key_secret=app.config["R2_SECRET_ACCESS_KEY"],
+        url_ttl_seconds=positive_int(app, "URL_TTL_SECONDS"),
+        key_prefix=app.config["R2_KEY_PREFIX"],
+        signing_region=app.config["R2_SIGNING_REGION"] or "auto",
+    )
+    # Settings being present is not the same as them being correct. Reach the
+    # bucket once now, so a wrong endpoint, bucket or credential is reported
+    # at startup instead of on the first doorbell press.
+    if app.config.get("R2_VERIFY_ON_START", True):
+        storage.check()
+        LOGGER.info("R2 bucket reachable bucket=%s", app.config["R2_BUCKET"])
+    return storage
+
+
+def derive_r2_endpoint(account_id: str, jurisdiction: str) -> str:
+    """Build the R2 S3 endpoint. EU buckets use a separate hostname."""
+    if not account_id:
+        return ""
+    region = (jurisdiction or "").strip().lower()
+    if region in ("eu", "fedramp"):
+        return f"https://{account_id}.{region}.r2.cloudflarestorage.com"
+    return f"https://{account_id}.r2.cloudflarestorage.com"
+
+
 def create_app(config: dict | None = None) -> Flask:
     app = Flask(__name__)
     app.config.from_mapping(
@@ -74,6 +167,23 @@ def create_app(config: dict | None = None) -> Flask:
         REQUEST_TIMEOUT=float(os.getenv("REQUEST_TIMEOUT", "10")),
         RETRY_COUNT=int(os.getenv("RETRY_COUNT", "3")),
         MAX_CONTENT_LENGTH=int(os.getenv("MAX_CONTENT_LENGTH", "20971520")),
+        STORAGE_BACKEND=os.getenv("STORAGE_BACKEND", "local"),
+        IMAGE_RETENTION_MINUTES=float(
+            os.getenv("IMAGE_RETENTION_MINUTES", "60")
+        ),
+        # Kept as a string on purpose: positive_int() validates it and
+        # reports a usable error. Converting here would raise a raw
+        # ValueError while building the mapping instead.
+        URL_TTL_SECONDS=os.getenv("URL_TTL_SECONDS", "900"),
+        R2_ACCOUNT_ID=os.getenv("R2_ACCOUNT_ID", ""),
+        R2_BUCKET=os.getenv("R2_BUCKET", ""),
+        R2_ACCESS_KEY_ID=os.getenv("R2_ACCESS_KEY_ID", ""),
+        R2_SECRET_ACCESS_KEY=os.getenv("R2_SECRET_ACCESS_KEY", ""),
+        R2_ENDPOINT_URL=os.getenv("R2_ENDPOINT_URL", ""),
+        R2_JURISDICTION=os.getenv("R2_JURISDICTION", ""),
+        R2_KEY_PREFIX=os.getenv("R2_KEY_PREFIX", DEFAULT_KEY_PREFIX),
+        R2_SIGNING_REGION=os.getenv("R2_SIGNING_REGION", "auto"),
+        R2_VERIFY_ON_START=env_flag("R2_VERIFY_ON_START"),
     )
     if config:
         app.config.update(config)
@@ -88,6 +198,31 @@ def create_app(config: dict | None = None) -> Flask:
 
     image_dir = Path(app.config["IMAGE_DIR"])
     image_dir.mkdir(parents=True, exist_ok=True)
+
+    storage = app.config.get("STORAGE") or build_storage(app)
+    app.config["STORAGE"] = storage
+
+    local_retention = app.config["IMAGE_RETENTION_MINUTES"] * 60
+    if storage.name == "r2":
+        retention_seconds = positive_int(app, "URL_TTL_SECONDS")
+    else:
+        retention_seconds = local_retention
+
+    if not app.config.get("TESTING"):
+        start_sweeper(storage, retention_seconds)
+        # A deployment that switched from local to r2 still has the old files
+        # on disk, and /images keeps serving them. Keep expiring them.
+        if storage.name != "local":
+            start_sweeper(
+                LocalStorage(app.config["IMAGE_DIR"], local_retention),
+                local_retention,
+            )
+
+    LOGGER.info(
+        "Storage backend=%s retention=%ss",
+        storage.name,
+        int(retention_seconds),
+    )
 
     @app.post("/")
     def receive_event():
@@ -169,19 +304,36 @@ def create_app(config: dict | None = None) -> Flask:
         suffix = suffix or ".jpg"
         original_name = f"{Path(original_name).stem}{suffix}"
         stored_name = f"{uuid4().hex}{suffix}"
-        (image_dir / stored_name).write_bytes(image)
 
         source_ip = request.remote_addr or "unknown"
         if source_ip.startswith("::ffff:"):
             source_ip = source_ip.removeprefix("::ffff:")
+        public_base_url = app.config["PUBLIC_BASE_URL"] or request.host_url
+
+        try:
+            storage.store(stored_name, image, image_content_type)
+            image_url = storage.url_for(stored_name, public_base_url)
+        except StorageError as error:
+            LOGGER.error(
+                "Storing image failed backend=%s status=%s code=%s: %s",
+                storage.name,
+                error.status,
+                error.code or "-",
+                error,
+            )
+            return jsonify(error=str(error)), 502
+        except Exception as error:  # noqa: BLE001 - surface any backend fault
+            LOGGER.error(
+                "Storing image failed backend=%s error=%s",
+                storage.name,
+                error,
+            )
+            return jsonify(error="storing the image failed"), 502
 
         fields.setdefault("message", "Mobotix event")
         fields["source_ip"] = source_ip
         fields["received_at"] = datetime.now(timezone.utc).isoformat()
-        public_base_url = app.config["PUBLIC_BASE_URL"] or request.host_url
-        fields["image_url"] = (
-            f"{public_base_url.rstrip('/')}/images/{stored_name}"
-        )
+        fields["image_url"] = image_url
         files = {
             field_name: (
                 original_name,
