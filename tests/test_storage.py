@@ -19,9 +19,18 @@ class FakeR2Client:
         self.deleted = []
         self.put_calls = []
 
-    def put_object(self, Bucket, Key, Body, ContentType):
+    def put_object(self, Bucket, Key, Body, ContentType, Metadata=None):
         self.put_calls.append((Bucket, Key, ContentType))
-        self.objects[Key] = {"body": Body, "modified": time.time()}
+        self.objects[Key] = {
+            "body": Body,
+            "modified": time.time(),
+            "metadata": dict(Metadata or {}),
+        }
+
+    def head_object(self, Bucket, Key):
+        if Key not in self.objects:
+            raise KeyError(Key)
+        return {"Metadata": self.objects[Key].get("metadata", {})}
 
     def generate_presigned_url(self, ClientMethod, Params, ExpiresIn):
         key = Params["Key"]

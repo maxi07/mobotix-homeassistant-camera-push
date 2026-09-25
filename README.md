@@ -172,7 +172,8 @@ Optional settings:
 - `URL_TTL_SECONDS` (default `900`) controls how long the presigned URL stays
   valid. The relay deletes the object after the same period. Must be greater
   than zero; the relay refuses to start otherwise.
-- `R2_KEY_PREFIX` stores objects under a prefix, e.g. `doorbell`.
+- `R2_KEY_PREFIX` (default `mobotix-relay`) namespaces relay objects. Set it
+  to an empty value only when the bucket is used by nothing else.
 - `R2_SIGNING_REGION` (default `auto`) is the SigV4 signing region. R2 expects
   `auto`; other providers need their real region, e.g. `eu-central-1`.
 - `R2_VERIFY_ON_START` (default `true`) reaches the bucket once during startup.
@@ -193,10 +194,16 @@ works with any other S3-compatible service (AWS S3, MinIO, Backblaze B2) via
 Option A.
 
 > [!NOTE]
-> The expiry sweeper only ever deletes objects whose key matches the shape the
-> relay generates (a 32-character hex UUID plus a file extension). A bucket
-> shared with other data is therefore safe, though a dedicated bucket or an
-> `R2_KEY_PREFIX` is still the cleaner setup.
+> Every upload carries an ownership marker in its object metadata
+> (`created-by: mobotix-relay`), and the expiry sweeper verifies that marker
+> on each object before deleting it. Objects without it -- anything this relay
+> did not upload -- are never touched, and a failed metadata lookup counts as
+> "not ours" too.
+>
+> Relay objects are additionally namespaced under `R2_KEY_PREFIX`
+> (default `mobotix-relay`), so unrelated objects are not even listed. A
+> dedicated bucket remains the cleanest setup, but a shared one will not lose
+> data.
 
 > [!NOTE]
 > `PUBLIC_BASE_URL` and `IMAGE_RETENTION_MINUTES` belong to the `local`

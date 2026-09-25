@@ -43,7 +43,17 @@ def test_foreign_keys_are_not_recognised():
         assert not is_relay_object(key), key
 
 
-class SpyClient:
+class OwnedObjects:
+    """Mischklasse: alle Objekte tragen den Besitzmarker des Relays.
+
+    Die Besitzpruefung im Sweeper fragt pro Kandidat head_object ab. Ohne
+    diese Antwort wuerde jeder Testfall als "nicht unseres" gelten.
+    """
+
+    def head_object(self, Bucket, Key):
+        return {"Metadata": {"created-by": "mobotix-relay"}}
+
+class SpyClient(OwnedObjects):
     """Erfasst, was geloescht wuerde."""
 
     def __init__(self, contents):
@@ -111,7 +121,7 @@ def test_sweep_without_prefix_does_not_wipe_a_shared_bucket():
 # --- Review: DeleteObjects meldet Teilfehler mit HTTP 200 ------------------
 
 
-class PartialFailureClient:
+class PartialFailureClient(OwnedObjects):
     def __init__(self):
         self.attempted = []
 
@@ -154,7 +164,7 @@ def test_partial_delete_failure_is_not_counted_as_removed(caplog):
 # --- Review: Listing muss paginieren --------------------------------------
 
 
-class PagingClient:
+class PagingClient(OwnedObjects):
     """Liefert zwei Seiten und erwartet, dass beide gelesen werden."""
 
     def __init__(self):
@@ -191,7 +201,7 @@ def test_sweep_follows_pagination_beyond_the_first_page():
     assert len(client.deleted) == 2
 
 
-class BatchClient:
+class BatchClient(OwnedObjects):
     """Prueft, dass Loeschungen in 1000er-Bloecken gehen."""
 
     def __init__(self, anzahl):

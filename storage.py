@@ -49,6 +49,17 @@ DELETE_BATCH_SIZE = 1000
 # an object as ours.
 RELAY_KEY_PATTERN = re.compile(r"^[0-9a-f]{32}\.[^/]+$")
 
+# A UUID-shaped name is not proof of ownership: an unrelated object of the
+# same shape could already sit in a shared bucket. Every upload therefore
+# carries an explicit marker in its user metadata, and the sweeper deletes
+# only objects that actually carry it.
+OWNER_METADATA_KEY = "created-by"
+OWNER_METADATA_VALUE = "mobotix-relay"
+
+# Default namespace. Keeping relay objects under their own prefix means the
+# sweeper never even lists anything else.
+DEFAULT_KEY_PREFIX = "mobotix-relay"
+
 
 class StorageError(RuntimeError):
     """A storage operation was rejected by the backend.
@@ -228,6 +239,7 @@ class R2Storage:
             Key=self._full_key(key),
             Body=data,
             ContentType=content_type,
+            Metadata={OWNER_METADATA_KEY: OWNER_METADATA_VALUE},
         )
 
     def url_for(self, key: str, base_url: str) -> str:
@@ -242,18 +254,32 @@ class R2Storage:
     def sweep(self) -> int:
         """Delete relay objects whose presigned URLs have expired.
 
-        Only keys created by this relay are considered, so a bucket shared
-        with other data is left alone.
+        Ownership is established in three steps, each narrowing further:
+        the configured prefix limits what is listed at all, the key shape
+        filters obvious strangers, and the ownership marker written at
+        upload time is verified per object before anything is deleted.
+        A name alone is never taken as proof.
         """
         cutoff = time.time() - self.url_ttl_seconds
-        expired = [
+        candidates = [
             item["Key"]
             for item in self._list_objects()
             if self._is_expired(item, cutoff)
         ]
-        if not expired:
+        if not candidates:
             return 0
-        removed = self._delete_in_batches(expired)
+        owned = [key for key in candidates if self._is_owned(key)]
+        skipped = len(candidates) - len(owned)
+        if skipped:
+            LOGGER.info(
+                "Left %s expired object(s) alone: no %s=%s marker",
+                skipped,
+                OWNER_METADATA_KEY,
+                OWNER_METADATA_VALUE,
+            )
+        if not owned:
+            return 0
+        removed = self._delete_in_batches(owned)
         if removed:
             LOGGER.info("Expired objects removed=%s", removed)
         return removed
@@ -263,6 +289,28 @@ class R2Storage:
         if not is_relay_object(item["Key"]):
             return False
         return item["LastModified"].timestamp() < cutoff
+
+    def _is_owned(self, key: str) -> bool:
+        """Verify the ownership marker written by store().
+
+        Objects that predate this check, or that belong to someone else,
+        have no marker and are therefore never deleted. Any doubt -- a
+        failed lookup included -- means the object stays.
+        """
+        try:
+            head = self.client.head_object(Bucket=self.bucket, Key=key)
+        except Exception as error:  # noqa: BLE001 - never delete on doubt
+            LOGGER.warning(
+                "Could not verify ownership of %s, leaving it alone: %s",
+                key,
+                error,
+            )
+            return False
+        metadata = (head or {}).get("Metadata") or {}
+        value = metadata.get(OWNER_METADATA_KEY)
+        if value is None:
+            value = metadata.get(OWNER_METADATA_KEY.replace("-", "_"))
+        return value == OWNER_METADATA_VALUE
 
     def _delete_in_batches(self, keys: list) -> int:
         removed = 0

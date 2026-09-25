@@ -11,7 +11,13 @@ import requests
 from flask import Flask, jsonify, request, send_from_directory
 from werkzeug.utils import secure_filename
 
-from storage import LocalStorage, R2Storage, StorageError, start_sweeper
+from storage import (
+    DEFAULT_KEY_PREFIX,
+    LocalStorage,
+    R2Storage,
+    StorageError,
+    start_sweeper,
+)
 
 
 LOGGER = logging.getLogger("mobotix-relay")
@@ -175,7 +181,7 @@ def create_app(config: dict | None = None) -> Flask:
         R2_SECRET_ACCESS_KEY=os.getenv("R2_SECRET_ACCESS_KEY", ""),
         R2_ENDPOINT_URL=os.getenv("R2_ENDPOINT_URL", ""),
         R2_JURISDICTION=os.getenv("R2_JURISDICTION", ""),
-        R2_KEY_PREFIX=os.getenv("R2_KEY_PREFIX", ""),
+        R2_KEY_PREFIX=os.getenv("R2_KEY_PREFIX", DEFAULT_KEY_PREFIX),
         R2_SIGNING_REGION=os.getenv("R2_SIGNING_REGION", "auto"),
         R2_VERIFY_ON_START=env_flag("R2_VERIFY_ON_START"),
     )
