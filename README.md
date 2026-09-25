@@ -126,25 +126,54 @@ Mobotix -> Relay -> R2 upload -> presigned URL -> HA webhook -> phone
 The relay only makes **outbound** connections. No port is opened, no tunnel is
 required, and Home Assistant stays unreachable from the internet.
 
+Three settings are always required:
+
 ```dotenv
-HA_WEBHOOK_URL=http://server:8123/api/webhook/YOUR_LONG_RANDOM_WEBHOOK_ID
 STORAGE_BACKEND=r2
-R2_ACCOUNT_ID=your_cloudflare_account_id
 R2_BUCKET=doorbell
 R2_ACCESS_KEY_ID=your_access_key_id
 R2_SECRET_ACCESS_KEY=your_secret_access_key
-R2_JURISDICTION=eu
-URL_TTL_SECONDS=900
 ```
 
-- `R2_JURISDICTION=eu` targets a bucket created with EU jurisdiction and
-  selects the `<account>.eu.r2.cloudflarestorage.com` endpoint. Leave empty for
-  a standard bucket.
-- `URL_TTL_SECONDS` controls how long the presigned URL stays valid. The relay
-  deletes the object after the same period.
-- `R2_KEY_PREFIX` optionally stores objects under a prefix.
-- `R2_ENDPOINT_URL` overrides the endpoint entirely, which makes this backend
-  usable with any S3-compatible service (AWS S3, MinIO, Backblaze B2).
+On top of that the relay needs to know **which endpoint** to talk to. There are
+two ways to express this — pick one, not both.
+
+**Option A — paste the endpoint (simplest).** When you create the API token,
+Cloudflare shows an S3 endpoint URL. Paste it as-is:
+
+```dotenv
+R2_ENDPOINT_URL=https://<account-id>.eu.r2.cloudflarestorage.com
+```
+
+The account ID is already part of that hostname, so `R2_ACCOUNT_ID` and
+`R2_JURISDICTION` are **not needed** and can stay empty.
+
+> [!IMPORTANT]
+> Do not append the bucket name to this URL. The bucket belongs in `R2_BUCKET`.
+
+**Option B — let the relay build it.** Useful when you have the account ID at
+hand but not the endpoint. Only used while `R2_ENDPOINT_URL` is empty:
+
+```dotenv
+R2_ACCOUNT_ID=your_cloudflare_account_id
+R2_JURISDICTION=eu
+```
+
+`R2_JURISDICTION=eu` produces `<account-id>.eu.r2.cloudflarestorage.com` for a
+bucket created with EU jurisdiction. Leave it empty for a standard bucket.
+
+Optional settings:
+
+- `URL_TTL_SECONDS` (default `900`) controls how long the presigned URL stays
+  valid. The relay deletes the object after the same period.
+- `R2_KEY_PREFIX` stores objects under a prefix, e.g. `doorbell`.
+
+Because the endpoint is configurable, this backend also works with any other
+S3-compatible service (AWS S3, MinIO, Backblaze B2) via Option A.
+
+> [!NOTE]
+> `PUBLIC_BASE_URL` and `IMAGE_RETENTION_MINUTES` belong to the `local`
+> backend and are ignored when `STORAGE_BACKEND=r2`.
 
 **Setting up the bucket in Cloudflare:**
 
