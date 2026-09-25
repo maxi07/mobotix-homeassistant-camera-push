@@ -120,7 +120,7 @@ def test_relay_returns_actionable_message_on_400(tmp_path):
         bucket="doorbell",
         endpoint_url="https://account.eu.r2.cloudflarestorage.com",
         access_key_id="key",
-        secret_access_key="secret",
+        access_key_secret="secret",
         client=RejectingClient(),
     )
     app = create_app(
@@ -158,7 +158,7 @@ def test_sweeper_survives_a_rejected_listing():
         bucket="doorbell",
         endpoint_url="https://account.eu.r2.cloudflarestorage.com",
         access_key_id="key",
-        secret_access_key="secret",
+        access_key_secret="secret",
         client=BrokenClient(),
     )
 

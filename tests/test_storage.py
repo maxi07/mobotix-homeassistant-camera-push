@@ -59,7 +59,7 @@ def make_r2(**kwargs):
         "bucket": "doorbell",
         "endpoint_url": "https://account.eu.r2.cloudflarestorage.com",
         "access_key_id": "key",
-        "secret_access_key": "secret",
+        "access_key_secret": "secret",
         "url_ttl_seconds": 900,
         "client": client,
     }
@@ -117,22 +117,26 @@ def test_r2_key_prefix_is_applied():
     ]
 
 
+FRESH_KEY = "0123456789abcdef0123456789abcdef.jpg"
+STALE_KEY = "fedcba9876543210fedcba9876543210.jpg"
+
+
 def test_r2_sweep_removes_only_expired_objects():
     storage, client = make_r2(url_ttl_seconds=900)
-    storage.store("fresh.jpg", JPEG_BYTES, "image/jpeg")
-    storage.store("stale.jpg", JPEG_BYTES, "image/jpeg")
-    client.objects["stale.jpg"]["modified"] = time.time() - 1000
+    storage.store(FRESH_KEY, JPEG_BYTES, "image/jpeg")
+    storage.store(STALE_KEY, JPEG_BYTES, "image/jpeg")
+    client.objects[STALE_KEY]["modified"] = time.time() - 1000
 
     removed = storage.sweep()
 
     assert removed == 1
-    assert client.deleted == ["stale.jpg"]
-    assert "fresh.jpg" in client.objects
+    assert client.deleted == [STALE_KEY]
+    assert FRESH_KEY in client.objects
 
 
 def test_r2_sweep_without_expired_objects_does_nothing():
     storage, client = make_r2()
-    storage.store("fresh.jpg", JPEG_BYTES, "image/jpeg")
+    storage.store(FRESH_KEY, JPEG_BYTES, "image/jpeg")
 
     assert storage.sweep() == 0
     assert client.deleted == []

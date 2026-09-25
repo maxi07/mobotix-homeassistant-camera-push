@@ -67,6 +67,17 @@ def parse_mime_parts(
     return parts
 
 
+def positive_int(app: Flask, name: str) -> int:
+    """Read a config value that must be a positive integer."""
+    try:
+        value = int(app.config[name])
+    except (TypeError, ValueError):
+        raise RuntimeError(f"{name} must be a whole number") from None
+    if value <= 0:
+        raise RuntimeError(f"{name} must be greater than 0, got {value}")
+    return value
+
+
 def build_storage(app: Flask):
     """Create the storage backend selected by STORAGE_BACKEND."""
     backend = (app.config["STORAGE_BACKEND"] or "local").strip().lower()
@@ -106,9 +117,10 @@ def build_r2_storage(app: Flask) -> R2Storage:
         bucket=app.config["R2_BUCKET"],
         endpoint_url=endpoint,
         access_key_id=app.config["R2_ACCESS_KEY_ID"],
-        secret_access_key=app.config["R2_SECRET_ACCESS_KEY"],
-        url_ttl_seconds=app.config["URL_TTL_SECONDS"],
+        access_key_secret=app.config["R2_SECRET_ACCESS_KEY"],
+        url_ttl_seconds=positive_int(app, "URL_TTL_SECONDS"),
         key_prefix=app.config["R2_KEY_PREFIX"],
+        signing_region=app.config["R2_SIGNING_REGION"] or "auto",
     )
 
 
@@ -143,6 +155,7 @@ def create_app(config: dict | None = None) -> Flask:
         R2_ENDPOINT_URL=os.getenv("R2_ENDPOINT_URL", ""),
         R2_JURISDICTION=os.getenv("R2_JURISDICTION", ""),
         R2_KEY_PREFIX=os.getenv("R2_KEY_PREFIX", ""),
+        R2_SIGNING_REGION=os.getenv("R2_SIGNING_REGION", "auto"),
     )
     if config:
         app.config.update(config)
@@ -161,12 +174,21 @@ def create_app(config: dict | None = None) -> Flask:
     storage = app.config.get("STORAGE") or build_storage(app)
     app.config["STORAGE"] = storage
 
+    local_retention = app.config["IMAGE_RETENTION_MINUTES"] * 60
     if storage.name == "r2":
-        retention_seconds = app.config["URL_TTL_SECONDS"]
+        retention_seconds = positive_int(app, "URL_TTL_SECONDS")
     else:
-        retention_seconds = app.config["IMAGE_RETENTION_MINUTES"] * 60
+        retention_seconds = local_retention
+
     if not app.config.get("TESTING"):
         start_sweeper(storage, retention_seconds)
+        # A deployment that switched from local to r2 still has the old files
+        # on disk, and /images keeps serving them. Keep expiring them.
+        if storage.name != "local":
+            start_sweeper(
+                LocalStorage(app.config["IMAGE_DIR"], local_retention),
+                local_retention,
+            )
 
     LOGGER.info(
         "Storage backend=%s retention=%ss",

@@ -78,8 +78,13 @@ The relay offers two storage backends, selected with `STORAGE_BACKEND`:
 
 | Backend | Image reachable | Use when |
 | --- | --- | --- |
-| `local` (default) | only on the local network | phones are always at home, or you already expose Home Assistant remotely |
+| `local` (default) | only where the phone can reach the relay | phones are always on the same network as the relay |
 | `r2` | anywhere | the notification must show the image away from home, **without** exposing your server |
+
+> [!NOTE]
+> Exposing Home Assistant remotely does **not** help the `local` backend. The
+> Companion app fetches the image URL directly from the relay, not through
+> Home Assistant, so the relay itself would have to be reachable.
 
 ### Option A: `local` backend (default)
 
@@ -165,11 +170,21 @@ bucket created with EU jurisdiction. Leave it empty for a standard bucket.
 Optional settings:
 
 - `URL_TTL_SECONDS` (default `900`) controls how long the presigned URL stays
-  valid. The relay deletes the object after the same period.
+  valid. The relay deletes the object after the same period. Must be greater
+  than zero; the relay refuses to start otherwise.
 - `R2_KEY_PREFIX` stores objects under a prefix, e.g. `doorbell`.
+- `R2_SIGNING_REGION` (default `auto`) is the SigV4 signing region. R2 expects
+  `auto`; other providers need their real region, e.g. `eu-central-1`.
 
-Because the endpoint is configurable, this backend also works with any other
-S3-compatible service (AWS S3, MinIO, Backblaze B2) via Option A.
+Because the endpoint and signing region are configurable, this backend also
+works with any other S3-compatible service (AWS S3, MinIO, Backblaze B2) via
+Option A.
+
+> [!NOTE]
+> The expiry sweeper only ever deletes objects whose key matches the shape the
+> relay generates (a 32-character hex UUID plus a file extension). A bucket
+> shared with other data is therefore safe, though a dedicated bucket or an
+> `R2_KEY_PREFIX` is still the cleaner setup.
 
 > [!NOTE]
 > `PUBLIC_BASE_URL` and `IMAGE_RETENTION_MINUTES` belong to the `local`
@@ -314,16 +329,6 @@ templates:
   backend cannot work outside the LAN. Switch to `STORAGE_BACKEND=r2`.
 - Notification arrives without an image at home: open the generated
   `image_url` from the phone and verify that the address is reachable.
-- iOS shows no thumbnail with the `r2` backend: presigned URLs carry no file
-  extension. Add an explicit content type in the automation:
-
-  ```yaml
-  data:
-    image: "{{ trigger.data.image_url }}"
-    attachment:
-      content-type: jpeg
-  ```
-
 - View logs with `docker compose logs -f mobotix-relay`.
 - With `STORAGE_BACKEND=local`, images are kept in the `relay-images` Docker
   volume and removed after `IMAGE_RETENTION_MINUTES`. With `r2`, objects live

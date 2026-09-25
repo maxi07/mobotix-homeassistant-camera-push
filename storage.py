@@ -4,7 +4,7 @@ Two backends are available and selected with ``STORAGE_BACKEND``:
 
 ``local``
     Writes images to a directory and serves them from the relay itself. This
-    only works while the receiving device is on the same network. Images are
+    only works while the receiving device can reach the relay. Images are
     removed after ``IMAGE_RETENTION_MINUTES``.
 
 ``r2``
@@ -19,11 +19,12 @@ access: once a presigned URL is past its TTL it stops working regardless of
 whether the object still exists.
 
 Note on the rejection of unsigned requests: that happens between the phone and
-R2, not inside this relay. The relay only ever creates the URL. Errors handled
-here are the ones raised by the relay's own calls to R2.
+the object store, not inside this relay. The relay only ever creates the URL.
+Errors handled here are the ones raised by the relay's own calls.
 """
 
 import logging
+import re
 import threading
 import time
 from pathlib import Path
@@ -32,6 +33,14 @@ LOGGER = logging.getLogger("mobotix-relay.storage")
 
 SWEEP_MIN_INTERVAL = 30.0
 SWEEP_MAX_INTERVAL = 300.0
+
+# S3 accepts at most 1000 keys per DeleteObjects request.
+DELETE_BATCH_SIZE = 1000
+
+# Objects created by this relay are named <uuid4-hex><suffix>. The sweeper
+# only ever deletes keys matching this shape, so pointing the relay at a
+# bucket that holds other data cannot destroy it.
+RELAY_KEY_PATTERN = re.compile(r"^[0-9a-f]{32}\.[A-Za-z0-9]{1,5}$")
 
 
 class StorageError(RuntimeError):
@@ -69,7 +78,10 @@ ERROR_HINTS = {
     "PermanentRedirect": (
         "wrong endpoint for this bucket - an EU bucket needs the .eu. endpoint"
     ),
-    "EntityTooLarge": "the image exceeds the size R2 accepts for a single PUT",
+    "AuthorizationHeaderMalformed": (
+        "wrong signing region - set R2_SIGNING_REGION for non-R2 providers"
+    ),
+    "EntityTooLarge": "the image exceeds the size the store accepts per PUT",
 }
 
 
@@ -91,7 +103,7 @@ def describe_error(operation: str, error: Exception) -> StorageError:
 
 
 def guard(operation: str, call, **kwargs):
-    """Run an S3 call and translate provider failures into StorageError."""
+    """Run a backend call and translate provider failures into StorageError."""
     try:
         return call(**kwargs)
     except StorageError:
@@ -105,6 +117,11 @@ def _sweep_interval(retention_seconds: float) -> float:
     if retention_seconds <= 0:
         return SWEEP_MAX_INTERVAL
     return max(SWEEP_MIN_INTERVAL, min(SWEEP_MAX_INTERVAL, retention_seconds / 2))
+
+
+def is_relay_object(key: str) -> bool:
+    """True when the key looks like one this relay created."""
+    return bool(RELAY_KEY_PATTERN.match(key.rsplit("/", 1)[-1]))
 
 
 class LocalStorage:
@@ -155,7 +172,7 @@ class LocalStorage:
 
 
 class R2Storage:
-    """Uploads images to Cloudflare R2 and returns presigned URLs."""
+    """Uploads images to an S3-compatible store and returns presigned URLs."""
 
     name = "r2"
 
@@ -164,20 +181,21 @@ class R2Storage:
         bucket: str,
         endpoint_url: str,
         access_key_id: str,
-        secret_access_key: str,
+        access_key_secret: str,
         url_ttl_seconds: int = 900,
         key_prefix: str = "",
+        signing_region: str = "auto",
         client=None,
     ) -> None:
         self.bucket = bucket
         self.url_ttl_seconds = url_ttl_seconds
         self.key_prefix = key_prefix.strip("/")
         self.client = client or self._build_client(
-            endpoint_url, access_key_id, secret_access_key
+            endpoint_url, access_key_id, access_key_secret, signing_region
         )
 
     @staticmethod
-    def _build_client(endpoint_url: str, access_key_id: str, secret: str):
+    def _build_client(endpoint_url, access_key_id, access_key_secret, region):
         import boto3
         from botocore.config import Config
 
@@ -185,8 +203,8 @@ class R2Storage:
             "s3",
             endpoint_url=endpoint_url,
             aws_access_key_id=access_key_id,
-            aws_secret_access_key=secret,
-            region_name="auto",
+            aws_secret_access_key=access_key_secret,
+            region_name=region,
             config=Config(signature_version="s3v4", retries={"max_attempts": 3}),
         )
 
@@ -215,34 +233,82 @@ class R2Storage:
         )
 
     def sweep(self) -> int:
-        """Delete objects whose presigned URLs have expired. Returns count."""
+        """Delete relay objects whose presigned URLs have expired.
+
+        Only keys created by this relay are considered, so a bucket shared
+        with other data is left alone.
+        """
         cutoff = time.time() - self.url_ttl_seconds
         expired = [
-            {"Key": item["Key"]}
+            item["Key"]
             for item in self._list_objects()
-            if item["LastModified"].timestamp() < cutoff
+            if self._is_expired(item, cutoff)
         ]
         if not expired:
             return 0
-        guard(
+        removed = self._delete_in_batches(expired)
+        if removed:
+            LOGGER.info("Expired objects removed=%s", removed)
+        return removed
+
+    @staticmethod
+    def _is_expired(item: dict, cutoff: float) -> bool:
+        if not is_relay_object(item["Key"]):
+            return False
+        return item["LastModified"].timestamp() < cutoff
+
+    def _delete_in_batches(self, keys: list) -> int:
+        removed = 0
+        for start in range(0, len(keys), DELETE_BATCH_SIZE):
+            batch = keys[start : start + DELETE_BATCH_SIZE]
+            removed += self._delete_batch(batch)
+        return removed
+
+    def _delete_batch(self, keys: list) -> int:
+        response = guard(
             "delete",
             self.client.delete_objects,
             Bucket=self.bucket,
-            Delete={"Objects": expired},
+            Delete={"Objects": [{"Key": key} for key in keys]},
         )
-        LOGGER.info("Expired R2 objects removed=%s", len(expired))
-        return len(expired)
+        # DeleteObjects answers 200 even when individual keys failed.
+        errors = (response or {}).get("Errors") or []
+        for failure in errors:
+            LOGGER.warning(
+                "Could not delete %s code=%s message=%s",
+                failure.get("Key"),
+                failure.get("Code"),
+                failure.get("Message"),
+            )
+        deleted = (response or {}).get("Deleted")
+        if deleted is not None:
+            return len(deleted)
+        return len(keys) - len(errors)
 
     def _list_objects(self) -> list:
-        params = {"Bucket": self.bucket, "MaxKeys": 1000}
+        """List every page, not just the first 1000 keys."""
+        items = []
+        token = None
+        while True:
+            response = guard(
+                "listing", self.client.list_objects_v2, **self._list_params(token)
+            )
+            items.extend(response.get("Contents", []))
+            token = response.get("NextContinuationToken")
+            if not response.get("IsTruncated") or not token:
+                return items
+
+    def _list_params(self, token) -> dict:
+        params = {"Bucket": self.bucket, "MaxKeys": DELETE_BATCH_SIZE}
         if self.key_prefix:
             params["Prefix"] = f"{self.key_prefix}/"
-        response = guard("listing", self.client.list_objects_v2, **params)
-        return response.get("Contents", [])
+        if token:
+            params["ContinuationToken"] = token
+        return params
 
     def check(self) -> None:
         """Verify credentials and bucket access. Raises StorageError."""
-        self._list_objects()
+        guard("listing", self.client.list_objects_v2, **self._list_params(None))
 
 
 def start_sweeper(backend, retention_seconds: float):
