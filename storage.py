@@ -40,7 +40,14 @@ DELETE_BATCH_SIZE = 1000
 # Objects created by this relay are named <uuid4-hex><suffix>. The sweeper
 # only ever deletes keys matching this shape, so pointing the relay at a
 # bucket that holds other data cannot destroy it.
-RELAY_KEY_PATTERN = re.compile(r"^[0-9a-f]{32}\.[A-Za-z0-9]{1,5}$")
+#
+# The suffix is deliberately unconstrained: when an image/* upload carries a
+# signature none of the detectors recognise, app.py falls back to the client's
+# own filename suffix, which can be any length and contain punctuation. A
+# narrower pattern would silently exclude those objects from retention and
+# leave them in the bucket forever. The 32-char hex prefix is what identifies
+# an object as ours.
+RELAY_KEY_PATTERN = re.compile(r"^[0-9a-f]{32}\.[^/]+$")
 
 
 class StorageError(RuntimeError):

@@ -37,6 +37,7 @@ def test_foreign_keys_are_not_recognised():
         "0123456789abcdef.jpg",  # zu kurz
         "0123456789abcdef0123456789abcdefXY.jpg",  # kein Hex
         "0123456789abcdef0123456789abcdef",  # ohne Endung
+        "0123456789abcdef0123456789abcde.jpg",  # 31 statt 32 Zeichen
     ]
     for key in fremde:
         assert not is_relay_object(key), key

@@ -147,7 +147,10 @@ def create_app(config: dict | None = None) -> Flask:
         IMAGE_RETENTION_MINUTES=float(
             os.getenv("IMAGE_RETENTION_MINUTES", "60")
         ),
-        URL_TTL_SECONDS=int(os.getenv("URL_TTL_SECONDS", "900")),
+        # Kept as a string on purpose: positive_int() validates it and
+        # reports a usable error. Converting here would raise a raw
+        # ValueError while building the mapping instead.
+        URL_TTL_SECONDS=os.getenv("URL_TTL_SECONDS", "900"),
         R2_ACCOUNT_ID=os.getenv("R2_ACCOUNT_ID", ""),
         R2_BUCKET=os.getenv("R2_BUCKET", ""),
         R2_ACCESS_KEY_ID=os.getenv("R2_ACCESS_KEY_ID", ""),

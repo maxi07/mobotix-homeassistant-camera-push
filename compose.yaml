@@ -23,6 +23,7 @@ services:
       R2_JURISDICTION: "${R2_JURISDICTION:-}"
       R2_ENDPOINT_URL: "${R2_ENDPOINT_URL:-}"
       R2_KEY_PREFIX: "${R2_KEY_PREFIX:-}"
+      R2_SIGNING_REGION: "${R2_SIGNING_REGION:-auto}"
     volumes:
       - relay-images:/data/images
     healthcheck:
