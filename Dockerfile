@@ -8,7 +8,7 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY app.py wsgi.py gunicorn_config.py ./
+COPY app.py storage.py wsgi.py gunicorn_config.py ./
 
 RUN mkdir -p /data/images && chown -R nobody:nogroup /data /app
 USER nobody

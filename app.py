@@ -11,6 +11,8 @@ import requests
 from flask import Flask, jsonify, request, send_from_directory
 from werkzeug.utils import secure_filename
 
+from storage import LocalStorage, R2Storage, start_sweeper
+
 
 LOGGER = logging.getLogger("mobotix-relay")
 
@@ -65,6 +67,61 @@ def parse_mime_parts(
     return parts
 
 
+def build_storage(app: Flask):
+    """Create the storage backend selected by STORAGE_BACKEND."""
+    backend = (app.config["STORAGE_BACKEND"] or "local").strip().lower()
+    if backend == "local":
+        return LocalStorage(
+            app.config["IMAGE_DIR"],
+            retention_seconds=app.config["IMAGE_RETENTION_MINUTES"] * 60,
+        )
+    if backend == "r2":
+        return build_r2_storage(app)
+    raise RuntimeError(
+        f"STORAGE_BACKEND must be 'local' or 'r2', got {backend!r}"
+    )
+
+
+def build_r2_storage(app: Flask) -> R2Storage:
+    """Create the R2 backend, failing loudly on incomplete configuration."""
+    missing = [
+        name
+        for name in (
+            "R2_BUCKET",
+            "R2_ACCESS_KEY_ID",
+            "R2_SECRET_ACCESS_KEY",
+        )
+        if not app.config.get(name)
+    ]
+    endpoint = app.config["R2_ENDPOINT_URL"] or derive_r2_endpoint(
+        app.config["R2_ACCOUNT_ID"], app.config["R2_JURISDICTION"]
+    )
+    if not endpoint:
+        missing.append("R2_ACCOUNT_ID (or R2_ENDPOINT_URL)")
+    if missing:
+        raise RuntimeError(
+            "STORAGE_BACKEND=r2 requires: " + ", ".join(missing)
+        )
+    return R2Storage(
+        bucket=app.config["R2_BUCKET"],
+        endpoint_url=endpoint,
+        access_key_id=app.config["R2_ACCESS_KEY_ID"],
+        secret_access_key=app.config["R2_SECRET_ACCESS_KEY"],
+        url_ttl_seconds=app.config["URL_TTL_SECONDS"],
+        key_prefix=app.config["R2_KEY_PREFIX"],
+    )
+
+
+def derive_r2_endpoint(account_id: str, jurisdiction: str) -> str:
+    """Build the R2 S3 endpoint. EU buckets use a separate hostname."""
+    if not account_id:
+        return ""
+    region = (jurisdiction or "").strip().lower()
+    if region in ("eu", "fedramp"):
+        return f"https://{account_id}.{region}.r2.cloudflarestorage.com"
+    return f"https://{account_id}.r2.cloudflarestorage.com"
+
+
 def create_app(config: dict | None = None) -> Flask:
     app = Flask(__name__)
     app.config.from_mapping(
@@ -74,6 +131,18 @@ def create_app(config: dict | None = None) -> Flask:
         REQUEST_TIMEOUT=float(os.getenv("REQUEST_TIMEOUT", "10")),
         RETRY_COUNT=int(os.getenv("RETRY_COUNT", "3")),
         MAX_CONTENT_LENGTH=int(os.getenv("MAX_CONTENT_LENGTH", "20971520")),
+        STORAGE_BACKEND=os.getenv("STORAGE_BACKEND", "local"),
+        IMAGE_RETENTION_MINUTES=float(
+            os.getenv("IMAGE_RETENTION_MINUTES", "60")
+        ),
+        URL_TTL_SECONDS=int(os.getenv("URL_TTL_SECONDS", "900")),
+        R2_ACCOUNT_ID=os.getenv("R2_ACCOUNT_ID", ""),
+        R2_BUCKET=os.getenv("R2_BUCKET", ""),
+        R2_ACCESS_KEY_ID=os.getenv("R2_ACCESS_KEY_ID", ""),
+        R2_SECRET_ACCESS_KEY=os.getenv("R2_SECRET_ACCESS_KEY", ""),
+        R2_ENDPOINT_URL=os.getenv("R2_ENDPOINT_URL", ""),
+        R2_JURISDICTION=os.getenv("R2_JURISDICTION", ""),
+        R2_KEY_PREFIX=os.getenv("R2_KEY_PREFIX", ""),
     )
     if config:
         app.config.update(config)
@@ -88,6 +157,22 @@ def create_app(config: dict | None = None) -> Flask:
 
     image_dir = Path(app.config["IMAGE_DIR"])
     image_dir.mkdir(parents=True, exist_ok=True)
+
+    storage = app.config.get("STORAGE") or build_storage(app)
+    app.config["STORAGE"] = storage
+
+    if storage.name == "r2":
+        retention_seconds = app.config["URL_TTL_SECONDS"]
+    else:
+        retention_seconds = app.config["IMAGE_RETENTION_MINUTES"] * 60
+    if not app.config.get("TESTING"):
+        start_sweeper(storage, retention_seconds)
+
+    LOGGER.info(
+        "Storage backend=%s retention=%ss",
+        storage.name,
+        int(retention_seconds),
+    )
 
     @app.post("/")
     def receive_event():
@@ -169,7 +254,16 @@ def create_app(config: dict | None = None) -> Flask:
         suffix = suffix or ".jpg"
         original_name = f"{Path(original_name).stem}{suffix}"
         stored_name = f"{uuid4().hex}{suffix}"
-        (image_dir / stored_name).write_bytes(image)
+
+        try:
+            storage.store(stored_name, image, image_content_type)
+        except Exception as error:  # noqa: BLE001 - surface any backend fault
+            LOGGER.error(
+                "Storing image failed backend=%s error=%s",
+                storage.name,
+                error,
+            )
+            return jsonify(error="storing the image failed"), 502
 
         source_ip = request.remote_addr or "unknown"
         if source_ip.startswith("::ffff:"):
@@ -179,9 +273,7 @@ def create_app(config: dict | None = None) -> Flask:
         fields["source_ip"] = source_ip
         fields["received_at"] = datetime.now(timezone.utc).isoformat()
         public_base_url = app.config["PUBLIC_BASE_URL"] or request.host_url
-        fields["image_url"] = (
-            f"{public_base_url.rstrip('/')}/images/{stored_name}"
-        )
+        fields["image_url"] = storage.url_for(stored_name, public_base_url)
         files = {
             field_name: (
                 original_name,
