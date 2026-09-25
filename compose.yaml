@@ -1,5 +1,11 @@
 services:
   mobotix-relay:
+    # Published image. `docker compose pull` fetches it, so a deployment
+    # needs only this file and .env -- no source checkout, no build.
+    # Pin a release with IMAGE_TAG=v1.0.0 instead of the default latest.
+    image: ghcr.io/maxi07/mobotix-homeassistant-camera-push:${IMAGE_TAG:-latest}
+    # Kept so `docker compose up -d --build` still builds from source
+    # when working on the code.
     build: .
     container_name: mobotix-relay
     restart: unless-stopped

@@ -74,6 +74,40 @@ Create the local environment file from the included template:
 cp .env.example .env
 ```
 
+### Running the published image
+
+Every push to `main` publishes a multi-architecture image (amd64 and arm64,
+so it also runs on a Raspberry Pi) to the GitHub Container Registry. A
+deployment therefore needs only `compose.yaml` and `.env` -- no source
+checkout and no local build:
+
+```sh
+docker compose pull
+docker compose up -d
+```
+
+The image is public, so no registry login is required.
+
+| Tag | Points at |
+| --- | --- |
+| `latest` | current `main` |
+| `v1.2.3`, `1.2`, `1` | a released version, once tags exist |
+| `sha-<commit>` | one exact commit |
+
+Pin a version in `.env` rather than tracking `latest`:
+
+```dotenv
+IMAGE_TAG=v1.0.0
+```
+
+To build from source instead -- when changing the code -- use
+`docker compose up -d --build`, which ignores the published image.
+
+> [!NOTE]
+> Updating means `docker compose pull && docker compose up -d`. A plain
+> `docker compose restart` reuses the existing container and would keep both
+> the old image and the old environment variables.
+
 The relay offers two storage backends, selected with `STORAGE_BACKEND`:
 
 | Backend | Image reachable | Use when |
