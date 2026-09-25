@@ -1,12 +1,16 @@
 name: Publish image
 
-# Build the image and publish it to the GitHub Container Registry.
+# Publish a released image to the GitHub Container Registry.
 #
-# Pull requests build but do not push: that verifies the Dockerfile still
-# builds for every architecture without publishing anything from a branch.
+# Only version tags publish. Creating a release in the web UI creates its tag
+# and therefore triggers this too. Pushes to main deliberately publish
+# nothing: main is verified by the test workflow, but what gets deployed is
+# always a release someone decided to cut.
+#
+# Pull requests build without pushing, so the Dockerfile stays verified for
+# every architecture without publishing from a branch.
 on:
   push:
-    branches: [main]
     tags: ["v*"]
   pull_request:
   workflow_dispatch:
@@ -53,8 +57,11 @@ jobs:
         uses: docker/metadata-action@v6
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          # latest=auto moves 'latest' to the newest semver release, and
+          # never to a pre-release such as v1.1.0-rc1.
+          flavor: |
+            latest=auto
           tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=semver,pattern={{major}}

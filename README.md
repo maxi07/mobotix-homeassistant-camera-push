@@ -76,10 +76,10 @@ cp .env.example .env
 
 ### Running the published image
 
-Every push to `main` publishes a multi-architecture image (amd64 and arm64,
-so it also runs on a Raspberry Pi) to the GitHub Container Registry. A
-deployment therefore needs only `compose.yaml` and `.env` -- no source
-checkout and no local build:
+Every release publishes a multi-architecture image (amd64 and arm64, so it
+also runs on a Raspberry Pi) to the GitHub Container Registry. A deployment
+therefore needs only `compose.yaml` and `.env` -- no source checkout and no
+local build:
 
 ```sh
 docker compose pull
@@ -88,16 +88,36 @@ docker compose up -d
 
 The image is public, so no registry login is required.
 
-| Tag | Points at |
-| --- | --- |
-| `latest` | current `main` |
-| `v1.2.3`, `1.2`, `1` | a released version, once tags exist |
-| `sha-<commit>` | one exact commit |
+Pushes to `main` publish nothing. What runs in production is always a release
+someone decided to cut, not whatever landed on the branch last.
 
-Pin a version in `.env` rather than tracking `latest`:
+**Cutting a release:** create a release in the web UI with a tag like
+`v1.0.0`, or push the tag directly:
+
+```sh
+git tag v1.0.0
+git push origin v1.0.0
+```
+
+The tag is what triggers the build; a GitHub release is just a changelog
+around it. Use three-part versions -- `v1.0` is not valid semver and would
+produce no version tags at all.
+
+One release creates several tags pointing at that same build:
+
+| Tag | Moves with |
+| --- | --- |
+| `1.0.0` | never -- fixed to this build |
+| `1.0` | each patch: `1.0.1`, `1.0.2` |
+| `1` | each minor: `1.1.0`, `1.2.0` |
+| `latest` | the newest release, never a pre-release |
+| `sha-<commit>` | never -- one exact commit |
+
+`compose.yaml` follows `latest` by default. To stay on a fixed version, set
+it in `.env` without touching the file that comes from the repository:
 
 ```dotenv
-IMAGE_TAG=v1.0.0
+IMAGE_TAG=1.0.0
 ```
 
 To build from source instead -- when changing the code -- use
