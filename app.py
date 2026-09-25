@@ -67,6 +67,17 @@ def parse_mime_parts(
     return parts
 
 
+def env_flag(name: str, default: str = "true") -> bool:
+    """Read a boolean environment value."""
+    return os.getenv(name, default).strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+        "",
+    )
+
+
 def positive_int(app: Flask, name: str) -> int:
     """Read a config value that must be a positive integer."""
     try:
@@ -113,7 +124,7 @@ def build_r2_storage(app: Flask) -> R2Storage:
         raise RuntimeError(
             "STORAGE_BACKEND=r2 requires: " + ", ".join(missing)
         )
-    return R2Storage(
+    storage = R2Storage(
         bucket=app.config["R2_BUCKET"],
         endpoint_url=endpoint,
         access_key_id=app.config["R2_ACCESS_KEY_ID"],
@@ -122,6 +133,13 @@ def build_r2_storage(app: Flask) -> R2Storage:
         key_prefix=app.config["R2_KEY_PREFIX"],
         signing_region=app.config["R2_SIGNING_REGION"] or "auto",
     )
+    # Settings being present is not the same as them being correct. Reach the
+    # bucket once now, so a wrong endpoint, bucket or credential is reported
+    # at startup instead of on the first doorbell press.
+    if app.config.get("R2_VERIFY_ON_START", True):
+        storage.check()
+        LOGGER.info("R2 bucket reachable bucket=%s", app.config["R2_BUCKET"])
+    return storage
 
 
 def derive_r2_endpoint(account_id: str, jurisdiction: str) -> str:
@@ -159,6 +177,7 @@ def create_app(config: dict | None = None) -> Flask:
         R2_JURISDICTION=os.getenv("R2_JURISDICTION", ""),
         R2_KEY_PREFIX=os.getenv("R2_KEY_PREFIX", ""),
         R2_SIGNING_REGION=os.getenv("R2_SIGNING_REGION", "auto"),
+        R2_VERIFY_ON_START=env_flag("R2_VERIFY_ON_START"),
     )
     if config:
         app.config.update(config)

@@ -175,6 +175,18 @@ Optional settings:
 - `R2_KEY_PREFIX` stores objects under a prefix, e.g. `doorbell`.
 - `R2_SIGNING_REGION` (default `auto`) is the SigV4 signing region. R2 expects
   `auto`; other providers need their real region, e.g. `eu-central-1`.
+- `R2_VERIFY_ON_START` (default `true`) reaches the bucket once during startup.
+  Set it to `false` only when the relay has to come up while the object store
+  is unreachable.
+
+On startup the relay lists the bucket once, so a wrong endpoint, bucket name or
+credential is reported immediately with the same actionable message shown in
+the troubleshooting table below. Without this the service would start happily
+and only fail at the first doorbell press. A successful check logs:
+
+```text
+R2 bucket reachable bucket=doorbell
+```
 
 Because the endpoint and signing region are configurable, this backend also
 works with any other S3-compatible service (AWS S3, MinIO, Backblaze B2) via

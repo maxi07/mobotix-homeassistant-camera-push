@@ -108,6 +108,9 @@ R2_ENV = {
     "R2_ACCESS_KEY_ID": "key",
     "R2_SECRET_ACCESS_KEY": "secret",
     "R2_ENDPOINT_URL": "https://x.eu.r2.cloudflarestorage.com",
+    # These tests cover TTL parsing, not connectivity. Without this the
+    # startup check would try to reach a fictional endpoint.
+    "R2_VERIFY_ON_START": "false",
 }
 
 
