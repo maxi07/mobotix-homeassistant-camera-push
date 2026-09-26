@@ -74,6 +74,64 @@ Create the local environment file from the included template:
 cp .env.example .env
 ```
 
+### Running the published image
+
+Every release publishes a multi-architecture image (amd64 and arm64, so it
+also runs on a Raspberry Pi) to the GitHub Container Registry. A deployment
+therefore needs only `compose.yaml` and `.env` -- no source checkout and no
+local build:
+
+```sh
+docker compose pull
+docker compose up -d
+```
+
+> [!IMPORTANT]
+> A GHCR package is created **private**. After the very first release, set its
+> visibility to public once, under the repository's Packages page ->
+> *Package settings* -> *Change visibility*. Until then `docker compose pull`
+> asks for a registry login. Once public, no login is required.
+
+Pushes to `main` publish nothing. What runs in production is always a release
+someone decided to cut, not whatever landed on the branch last.
+
+**Cutting a release:** create a release in the web UI with a tag like
+`v1.0.0`, or push the tag directly:
+
+```sh
+git tag v1.0.0
+git push origin v1.0.0
+```
+
+The tag is what triggers the build; a GitHub release is just a changelog
+around it. Use three-part versions -- `v1.0` is not valid semver and would
+produce no version tags at all.
+
+One release creates several tags pointing at that same build:
+
+| Tag | Moves with |
+| --- | --- |
+| `1.0.0` | never -- fixed to this build |
+| `1.0` | each patch: `1.0.1`, `1.0.2` |
+| `1` | each minor: `1.1.0`, `1.2.0` |
+| `latest` | the newest release, never a pre-release |
+| `sha-<commit>` | never -- one exact commit |
+
+`compose.yaml` follows `latest` by default. To stay on a fixed version, set
+it in `.env` without touching the file that comes from the repository:
+
+```dotenv
+IMAGE_TAG=1.0.0
+```
+
+To build from source instead -- when changing the code -- use
+`docker compose up -d --build`, which ignores the published image.
+
+> [!NOTE]
+> Updating means `docker compose pull && docker compose up -d`. A plain
+> `docker compose restart` reuses the existing container and would keep both
+> the old image and the old environment variables.
+
 The relay offers two storage backends, selected with `STORAGE_BACKEND`:
 
 | Backend | Image reachable | Use when |
