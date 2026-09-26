@@ -86,7 +86,11 @@ docker compose pull
 docker compose up -d
 ```
 
-The image is public, so no registry login is required.
+> [!IMPORTANT]
+> A GHCR package is created **private**. After the very first release, set its
+> visibility to public once, under the repository's Packages page ->
+> *Package settings* -> *Change visibility*. Until then `docker compose pull`
+> asks for a registry login. Once public, no login is required.
 
 Pushes to `main` publish nothing. What runs in production is always a release
 someone decided to cut, not whatever landed on the branch last.
