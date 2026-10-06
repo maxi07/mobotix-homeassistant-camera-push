@@ -1,0 +1,78 @@
+name: Publish image
+
+# Publish a released image to the GitHub Container Registry.
+#
+# Only version tags publish. Creating a release in the web UI creates its tag
+# and therefore triggers this too. Pushes to main deliberately publish
+# nothing: main is verified by the test workflow, but what gets deployed is
+# always a release someone decided to cut.
+#
+# This workflow runs only for tags. Pull-request builds belong in tests.yml,
+# where no job can obtain package-write permission.
+on:
+  push:
+    tags: ["v*"]
+
+# Read-only by default. The publish job raises this for itself alone.
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  publish:
+    name: build and push
+    # Belt and braces: the trigger already limits this to v* tags, and the
+    # condition repeats it so a future trigger change cannot silently start
+    # publishing from a branch.
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v4
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to the registry
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Derive tags and labels
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ghcr.io/${{ github.repository }}
+          # Never write moving tags here: rebuilding an older release could
+          # roll them back. Deployments pin an exact semver tag instead.
+          flavor: |
+            latest=false
+          tags: |
+            type=semver,pattern={{version}}
+            type=sha,format=long
+          labels: |
+            org.opencontainers.image.title=Mobotix Home Assistant camera push
+            org.opencontainers.image.description=Forward Mobotix T25 notifications with alarm image to Home Assistant
+
+      - name: Build and push
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

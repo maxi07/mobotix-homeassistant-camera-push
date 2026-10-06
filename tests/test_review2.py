@@ -37,9 +37,9 @@ def test_signing_region_reaches_the_container():
 
 
 def test_every_documented_variable_is_passed_through():
-    # RELAY_PORT maps the published port and is consumed by Compose itself,
-    # not handed to the application.
-    missing = documented_variables() - compose_variables() - {"RELAY_PORT"}
+    # RELAY_PORT maps the published port and IMAGE_TAG chooses the image;
+    # both are consumed by Compose, not handed to the application.
+    missing = documented_variables() - compose_variables() - {"RELAY_PORT", "IMAGE_TAG"}
 
     assert not missing, f"not passed into the container: {sorted(missing)}"
 
