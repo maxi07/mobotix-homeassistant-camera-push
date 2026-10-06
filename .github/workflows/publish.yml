@@ -7,13 +7,11 @@ name: Publish image
 # nothing: main is verified by the test workflow, but what gets deployed is
 # always a release someone decided to cut.
 #
-# The build and the publish are separate jobs on purpose. A pull request can
-# modify this file, so the job it runs must never hold a token that can write
-# to or delete packages. Only the tag job gets packages: write.
+# This workflow runs only for tags. Pull-request builds belong in tests.yml,
+# where no job can obtain package-write permission.
 on:
   push:
     tags: ["v*"]
-  pull_request:
 
 # Read-only by default. The publish job raises this for itself alone.
 permissions:
@@ -24,36 +22,6 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  build:
-    name: build (no publish)
-    # Verifies the Dockerfile still builds for every architecture. Never
-    # pushes, and never holds package-write permission.
-    if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    permissions:
-      contents: read
-
-    steps:
-      - uses: actions/checkout@v7
-
-      # Needed to build the arm64 image on an amd64 runner, so the image
-      # also runs on a Raspberry Pi.
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v4
-
-      - name: Set up Buildx
-        uses: docker/setup-buildx-action@v4
-
-      - name: Build
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          platforms: linux/amd64,linux/arm64
-          push: false
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
   publish:
     name: build and push
     # Belt and braces: the trigger already limits this to v* tags, and the
@@ -87,14 +55,12 @@ jobs:
         uses: docker/metadata-action@v6
         with:
           images: ghcr.io/${{ github.repository }}
-          # latest=auto moves 'latest' to the newest semver release, and
-          # never to a pre-release such as v1.1.0-rc1.
+          # Never write moving tags here: rebuilding an older release could
+          # roll them back. Deployments pin an exact semver tag instead.
           flavor: |
-            latest=auto
+            latest=false
           tags: |
             type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=semver,pattern={{major}}
             type=sha,format=long
           labels: |
             org.opencontainers.image.title=Mobotix Home Assistant camera push
